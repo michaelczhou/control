@@ -31,17 +31,58 @@ using namespace std;
 
 serial::Serial ser; //声明串口对象
 
+motor_control::readDataAll odom_data;  //里程计数据
+motor_control::readDataAll odom_data_;
+motor_control::readCurrent current_data;  //电流数据
 
+ros::Publisher* odom_pub_;
+ros::Publisher* pulse_pub_;
 ros::Publisher* motor_pub_;
+ros::Publisher* current_pub_;
 
-double scale = 0.6/548;//1:36减速
+short p1,p2,p3,p4;
+short p1_tmp = 0;
+short p2_tmp = 0;
+short p3_tmp = 0;
+short p4_tmp = 0;
+int error_cnt = 0;
+bool cflag = false;
+ros::Timer timer1;
+//bool speed_refresh = false;
+//bool odom_thread1 = false;
+//bool odom_thread2 = false;
+//bool odom_thread3 = false;
+//bool odom_thread4 = false;
 
-double a  = 0.322;//1:36减速
-double b  = 0.215;//1:36减速
+//bool frequence_thread1 = false;
+//bool frequence_thread2 = false;
+//bool frequence_thread3 = false;
+//bool frequence_thread4 = false;
+
+//bool current_thread1 = false;
+//bool current_thread2 = false;
+//bool current_thread3 = false;
+//bool current_thread4 = false;
+
+//bool speed_refresh_1 = false;
+//bool speed_refresh_2 = false;
+//bool speed_refresh_3 = false;
+//bool speed_refresh_4 = false;
+
+tf::TransformBroadcaster* odom_broadcaster_;
+//double period = 0.0;
+//double scale = 0.000766*1.2052*0.6904;  //1:50减速箱
+double scale = 0.6/548;
+//double a = 0.25;
+//double b = 0.255;
+double a  = 0.322;
+double b  = 0.215;
 
 double vel_[4];
 int update_freq_ = 20;
+//memset(cmd_, 0, sizeof cmd_);
 
+//bool init=false;
 
 int is_cmd_valid = 1;  //指令是否有效标志
 
@@ -213,9 +254,217 @@ int DectoHex(short dec, unsigned char *hex, int length)
     return 0;
 }
 
+/*
+ *  读取电机换向脉冲数
+ */
+void Get_Odom(int ser_id)
+{
+    //int ser_id = *((int*)thread);
+    if (ser_id >= 0 && ser_id <4)
+    {
+        //cout << "ser_id:         " << ser_id << endl;
+        uint8_t send[8];
+        int check;
+        int check_temp;
+        send[0] = (uint8_t)(ser_id + 1);
+        send[1] = 0x03;
+        send[2] = 0x00;
+        send[3] = 0x24;
+        send[4] = 0x00;
+        send[5] = 0x02;  //连续读取2个寄存器，一共4个字节
+
+        check = usMBCRC16(send,6);
+        send[6] = check & 0xff;
+        send[7] = (check>>8) & 0xff;
+
+        ser.write(send,8);
+
+        vector<uint8_t> receive;
+        ser.read(receive,9);  //每次发送完读命令，需要立刻读串口数据，否则会丢失
+
+        uint8_t temp[9];
+	
+	if (receive.size() == 9)
+	{
+            for(int i=0; i<7; i++)
+            {
+                temp[i] = receive[i];
+            }
+            check_temp = usMBCRC16(temp,7);  //7个字节计算CRC校验
 
 
+            if ((receive[7]+(receive[8]<<8)) == check_temp)  //若CRC一致
+            {
+                switch(receive[0])
+                {
+                case 1:
+                    odom_data.odom1 =  (((receive[3]) << 24)|((receive[4]) << 16)|((receive[5]) << 8)|receive[6])*scale;
+                    odom_data_.odom1 = (((receive[3]) << 24)|((receive[4]) << 16)|((receive[5]) << 8)|receive[6]);
+                    //cout << "get_odom1-------------:" <<odom_data_.odom1<< endl;
+                    break;
+                case 2:
+                    odom_data.odom2 =  (((receive[3]) << 24)|((receive[4]) << 16)|((receive[5]) << 8)|receive[6])*scale;
+                    //odom_data_.odom2 = (((receive[3]) << 24)|((receive[4]) << 16)|((receive[5]) << 8)|receive[6]);
+                    //cout << "get_odom2-------------" << endl;
+                    break;
+                case 3:
+                    odom_data.odom3 =  (((receive[3]) << 24)|((receive[4]) << 16)|((receive[5]) << 8)|receive[6])*scale;
+                    //odom_data_.odom3 = (((receive[3]) << 24)|((receive[4]) << 16)|((receive[5]) << 8)|receive[6]);
+                    //cout << "get_odom3-------------" << endl;
+                    break;
+                case 4:
+                    odom_data.odom4 =  (((receive[3]) << 24)|((receive[4]) << 16)|((receive[5]) << 8)|receive[6])*scale;
+                    //odom_data_.odom4 = (((receive[3]) << 24)|((receive[4]) << 16)|((receive[5]) << 8)|receive[6]);
+                    //cout << "get_odom4-------------" << endl;
+                    break;
+                default:
+                    break;
+                }
+            }
+         }
+        else
+        {
+            ROS_WARN("The number received in Get_Odom by USB%d less than 9,receive %d data",ser_id,receive.size());
+        }
+    }
+}
 
+/*
+ *  读取实时电流
+ */
+void Get_Current(int ser_id)
+{
+    if (ser_id >= 0 && ser_id <4)
+    {
+        uint8_t send[8];
+        int check;
+        int check_temp;
+
+        send[0] = (uint8_t)(ser_id + 1);
+        send[1] = 0x03;
+        send[2] = 0x00;
+        send[3] = 0x21;
+        send[4] = 0x00;  //实时电流寄存器
+        send[5] = 0x01;
+        check = usMBCRC16(send,6);
+        send[6] = check & 0xff;
+        send[7] = (check>>8) & 0xff;
+        //cout << "0x" << hex << int(send[6]) << " ";
+        //cout << "0x" << hex << int(send[7]) << endl;
+
+        ser.write(send,8);
+
+        vector<uint8_t> receive;
+        ser.read(receive,7);  //每次发送完读命令，需要立刻读串口数据，否则会丢失
+
+        if (receive.size() == 5)  //当从站接收错误时,从站回送5个字节
+        {
+            ROS_INFO("Received Error:%02X",int(receive[2]));  //输出错误码
+        }
+        else if(receive.size() == 7)  //正常情况下读回７个字节
+        {
+            uint8_t temp[7];
+
+            for(int i=0; i<5; i++)
+            {
+                temp[i] = receive[i];
+            }
+
+            check_temp = usMBCRC16(temp,5);  //5个字节计算CRC
+
+            if( (receive[5]+(receive[6]<<8)) == check_temp )
+            {
+                switch((int)receive[0])
+                {
+                case 1:
+                    current_data.current1 = (((receive[3])<<8)|receive[4])*0.01;
+                    break;
+                case 2:
+                    current_data.current2 = (((receive[3])<<8)|receive[4])*0.01;
+                    break;
+                case 3:
+                    current_data.current3 = (((receive[3])<<8)|receive[4])*0.01;
+                    break;
+                case 4:
+                    current_data.current4 = (((receive[3])<<8)|receive[4])*0.01;
+                    break;
+                default:
+                    break;
+                }
+            }
+            else
+            {
+                ROS_INFO("接受电流数据错误！");
+            }
+        }
+    }
+}
+
+/*
+ *  读取电机实时换向频率（转速）
+ */
+void current_frequence(int ser_id)
+{
+    if (ser_id >= 0 && ser_id < 4)
+    {
+        uint8_t send[8];
+        int check;
+        int check_temp;
+
+        send[0] = (uint8_t)(ser_id + 1);
+        send[1] = 0x03;
+        send[2] = 0x00;
+        send[3] = 0x22;
+        send[4] = 0x00;
+        send[5] = 0x01;
+        check = usMBCRC16(send,6);	//CRC16
+        send[6] = check&0xff;
+        send[7] = (check>>8)&0xff;
+        //cout << "0x" << hex << int(send[6]) << " ";
+        //cout << "0x" << hex << int(send[7]) << endl;
+
+        ser.write(send,8);
+
+        vector<uint8_t> receive;
+        ser.read(receive,7); //每次发送完读命令，需要立刻读串口数据，否则会丢失
+
+        if (receive.size() == 5)  //当从站接收错误时,从站回送5个字节
+        {
+            ROS_INFO("Received Error:%02X",int(receive[2]));  //输出错误码
+        }
+        else if(receive.size() == 7)
+        {
+            uint8_t temp[7];
+
+            for(int i=0; i<5; i++)
+            {
+                temp[i] = receive[i];
+            }
+            check_temp = usMBCRC16(temp,5);
+
+            if (check_temp == receive[5]<<8|receive[6]) 	//校验成功
+            {
+                switch(receive[0])
+                {
+                case 1:
+                    odom_data_.odom1 =  (((receive[3]) << 8)|receive[4])*0.1;
+                    break;
+                case 2:
+                    odom_data_.odom2 = (((receive[3]) << 8)|receive[4])*0.1;
+                    break;
+                case 3:
+                    odom_data_.odom3 =  (((receive[3]) << 8)|receive[4])*0.1;
+                    break;
+                case 4:
+                    odom_data_.odom4 = (((receive[3]) << 8)|receive[4])*0.1;
+                    break;
+                default:
+                    break;
+                }
+            }
+        }
+    }
+}
 
 /*
  *  设定占空比
@@ -495,25 +744,194 @@ bool hard_braking()
     return state;
 }
 
+void odom_test()
+{
+    uint8_t send[8];
+    int check;
+    int check_temp;
+    
+    //电机实时位置
+    send[0] = 0X01;
+    send[1] = 0x03;
+    send[2] = 0x00;
+    send[3] = 0x24;
+    send[4] = 0x00;
+    send[5] = 0x02;
+    check = usMBCRC16(send,6);
+    send[6] = check&0xff;
+    send[7] = (check>>8)&0xff;
+    //cout << "0x" << hex << int(send[6]) << " ";
+    //cout << "0x" << hex << int(send[7]) << endl;
+
+    ser.write(send,8);
+
+    vector<uint8_t> receive;
+    ser.read(receive,9); //每次发送完读命令，需要立刻读串口数据，否则会丢失
+    //cout << "receive" << " "<<  receive.size() << endl;
+
+    uint8_t temp[9];
+    int i;
+    for(i = 0;i<7;i++)
+    {
+        temp[i] = receive[i];
+    }
+    check_temp = usMBCRC16(temp,7);
+
+    if (receive[0] == 0x01 && receive[1] == 0x03)
+    {
+        if (receive.size() == 9)
+        {
+            //check_temp = usMBCRC16(receive,7);
+            if (check_temp == receive[7]<<8|receive[8])
+            {
+                //long odom;
+                odom_data.odom1 =  ((receive[3]) << 24)|((receive[4]) << 16)|((receive[5]) << 8)|receive[6];
+                //cout << odom <<endl;
+                odom_pub_->publish(odom_data);
+                //odom = ((receive[3]) << 24)|((receive[4]) << 16)|((receive[5]) << 8)|receive[6];
+            }
+        }
+    }
+}
+
+/*
+ *  里程计数据发布
+ */
+void odom_publish()
+{
+    static int init = 0;
+
+    if(++init < 6)
+    {
+        last_data[0]=odom_data.odom1;
+        last_data[1]=odom_data.odom2;
+        last_data[2]=odom_data.odom3;
+        last_data[3]=odom_data.odom4;
+//      cout << "--------------------------------" << endl;
+//      cout << " odom_data.odom1" << odom_data.odom1;
+//      cout << " odom_data.odom2" << odom_data.odom2;
+//      cout << " odom_data.odom3" << odom_data.odom3;
+//      cout << " odom_data.odom4" << odom_data.odom4 << endl;
+
+        //更新时间
+        updated_ = ros::Time::now().toSec();
+        //init=true;
+        return;
+    }
+
+    double period = ros::Time::now().toSec() - updated_;
+    updated_ = ros::Time::now().toSec();
+    //cout << "period"<< period << endl;
+
+    //注意电源关闭之后，驱动器并没有马上掉电
+    double vel1 =-(double)((double)(odom_data.odom1-last_data[0])/(double)period);
+    double vel2 =-(double)((double)(odom_data.odom2-last_data[1])/(double)period);
+    double vel3 =(double)((double)(odom_data.odom3-last_data[2])/(double)period);
+    double vel4 =(double)((double)(odom_data.odom4-last_data[3])/(double)period);
+
+//    cout << "vel1:" << vel1 << " ";
+//    cout << "vel2:" << vel2 << " ";
+//    cout << "vel3:" << vel3 << " ";
+//    cout << "vel4:" << vel4 << endl;
+
+    last_data[0]=(double)odom_data.odom1;
+    last_data[1]=(double)odom_data.odom2;
+    last_data[2]=(double)odom_data.odom3;
+    last_data[3]=(double)odom_data.odom4;
+
+//    cout << " odom_data.odom1" << odom_data.odom1;
+//    cout << " odom_data.odom2" << odom_data.odom2;
+//    cout << " odom_data.odom3" << odom_data.odom3;
+//    cout << " odom_data.odom4" << odom_data.odom4 << endl;
+
+    vel_[0] = vel1;
+    vel_[1] = vel3;
+    vel_[2] = vel4;
+    vel_[3] = vel2;
+
+    vx=(vel_[0]+vel_[1]+vel_[2]+vel_[3])/4.0;
+    vy=0.0;
+    vth=(((vel_[0]-vel_[2])/2.0/(a+b)+(vel_[3]-vel_[1])/2.0/(a+b))/2.0)*(2*M_PI/5.72);  //5.18498
+    //*(2*M_PI/5.18498)
+//    cout << "vel_[0]"<< vel_[0] << endl;
+//        cout << "vel_[1]"<< vel_[1] << endl;
+//            cout << "vel_[2]"<< vel_[2] << endl;
+//                cout << "vel_[3]"<< vel_[3] << endl;
+//                    cout << "a"<< a << endl;
+//                    cout << "b"<< b << endl;
+//    cout << "vel_[0]" << vel_[0] << endl;
+    //vth=((vel_[0]-vel_[1])/2.0/(a+b)+(vel_[3]-vel_[2])/2.0/(a+b))/2.0;
+
+    double delta_x = (vx * cos(th) - vy * sin(th))*period;
+    double delta_y = (vx * sin(th) + vy * cos(th))*period;
+    double delta_th = vth*period;
+
+    //cout << "delta_th:" << delta_th << endl;
+
+    pose_x += (double)delta_x;
+    pose_y += (double)delta_y;
+    pose_th += (double)delta_th;
+
+    x+=(double)delta_x;
+    y+=(double)delta_y;
+    th = th + (double)delta_th;
+
+
+    //cout << "th:" << th << endl;
+
+    geometry_msgs::Quaternion odom_quat = tf::createQuaternionMsgFromYaw(th);
+
+    geometry_msgs::TransformStamped odom_trans;
+    odom_trans.header.stamp = ros::Time::now();
+    odom_trans.header.frame_id = "odom";
+    odom_trans.child_frame_id = "base_link";
+
+    odom_trans.transform.translation.x = x;
+    odom_trans.transform.translation.y = y;
+    odom_trans.transform.translation.z = 0.0;
+    odom_trans.transform.rotation = odom_quat;
+
+    //发布tf变换
+    //odom_broadcaster_->sendTransform(odom_trans);
+
+    nav_msgs::Odometry odom;
+    odom.header.stamp = ros::Time::now();
+    odom.header.frame_id = "odom";
+
+    odom.pose.pose.position.x = x;
+    odom.pose.pose.position.y = y;
+    odom.pose.pose.position.z = 0.0;
+    odom.pose.pose.orientation = odom_quat;
+
+    odom.child_frame_id = "base_link";
+    odom.twist.twist.linear.x = vx;
+    odom.twist.twist.linear.y = vy;
+    odom.twist.twist.angular.z = vth;
+
+    //odom_pub.publish(odom);
+    odom_pub_->publish(odom);  //里程计数据发布
+}
+
+/*
+ *  电流数据发布
+ */
+void current_publish()
+{
+    current_pub_->publish(current_data);
+}
+
 /*
  * 手柄消息的回调函数，转化为车轮速度指令
  */
 void receiveSpeed(geometry_msgs::Twist twist)
 {
     float x,angle;
-
-    if(bMotorTypeIs50_1)
-    {
-      x = twist.linear.x * 2000*6.62 ;  //线速度;
-      angle = twist.angular.z * 2000*3.268 ;  //角速度;
-    }
-    else
-    {
-      x = twist.linear.x * 2000*6.62 / 50 * 36;  //线速度;
-      angle = twist.angular.z * 2000*3.268 / 50 * 36;  //角速度;
-    }
     //x = twist.linear.x * 0.667;//线速度对应的pwm占空比
+    x = twist.linear.x * 2000.0 * 6.62 / 50 * 36;  //线速度
+    angle = twist.angular.z * 2000.0 * 3.268 / 50 * 36;  //角速度
     //angle = twist.angular.z * 0.328;//角速度对应的pwm占空比
+
+    //ROS_INFO("x:%d  angel:%d",(int)x,(int)angle);
 
     p1 = (short)(x + angle);
     p2 = p1;
@@ -639,35 +1057,23 @@ int main(int argc, char **argv)
     ros::init(argc, argv, "talker");
 
     ros::NodeHandle n;
-    ros::NodeHandle nh_param("~");
 
-    nh_param.param<bool>("MotorTypeIs50_1", bMotorTypeIs50_1, true);
-    if(bMotorTypeIs50_1)
-    {
-      double a = 0.25;//1:50减速箱
-      double b = 0.255;//1:50减速箱
-      scale = 0.000766*1.2052*0.6904;  //1:50减速箱
-    }
-     else
-    {
-        double a  = 0.322;//1:36减速
-        double b  = 0.215;//1:36减速
-        scale = 0.6/548;//1:36减速
-    }
-
-    
+    ros::Publisher odom_pub = n.advertise<nav_msgs::Odometry>("odom",1,true);
+    ros::Publisher current_pub = n.advertise<motor_control::readCurrent>("current",1,true);
+    ros::Publisher pulse_pub = n.advertise<motor_control::readDataAll>("/pulse_count",1,true);
+    //ros::Publisher motor_pub = n.advertise<std_msgs::Bool>("motor",1,true);
     ros::Subscriber speed_sub = n.subscribe<geometry_msgs::Twist>("/smooth_cmd_vel",1, &receiveSpeed);
     //ros::Subscriber speed_sub = n.subscribe<geometry_msgs::Twist>("/cmd_vel",1, &receiveSpeed);
     ros::Subscriber is_cmd_valid_sub = n.subscribe<std_msgs::Float32>("stop",1, &protect);
     //ros::Subscriber joy_sub = n.subscribe<std_msgs::Float32>("cmd",1,&change_pwm);
 
-    // tf::TransformBroadcaster odom_broadcaster;
+    tf::TransformBroadcaster odom_broadcaster;
 
-    // odom_pub_ = &odom_pub;
-    // pulse_pub_ = &pulse_pub;
-    // current_pub_ = &current_pub;
+    odom_pub_ = &odom_pub;
+    pulse_pub_ = &pulse_pub;
+    current_pub_ = &current_pub;
     //motor_pub_ = &motor_pub;
-    // odom_broadcaster_ = &odom_broadcaster;
+    odom_broadcaster_ = &odom_broadcaster;
   
     ros::Rate loop_rate(100);
   
@@ -723,6 +1129,30 @@ int main(int argc, char **argv)
             set_speed(3, p4);
         }
 
+       //error_state(3);
+        for(int i=0; i<4; i++)
+        {
+            Get_Odom(i);    //读取里程计
+
+            //error_state(i);
+            //current_frequence(i);   //读取转速
+        }
+
+        odom_publish();  //里程计发布
+
+        count++;
+        if(count == 15)
+        {
+            count = 0;
+
+            for(int i=0;i<4;i++)
+            {
+                Get_Current(i);
+            }
+            current_publish();  //电流发布
+        }
+
+        //pulse_pub.publish(odom_data_);
 
         loop_rate.sleep();
         ros::spinOnce();
