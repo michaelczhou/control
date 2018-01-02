@@ -82,13 +82,12 @@ int main(int argc, char** argv)
 	ros::NodeHandle ph;
 
 	TeleopJoy teleop_turtle;
-  ros::Rate loop_rate(20);
+  ros::Rate loop_rate(50);
 	
 
   while (ros::ok())
   {
     teleop_turtle.pub_cmd();
-
 
     loop_rate.sleep();
     ros::spinOnce();
