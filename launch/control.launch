@@ -7,6 +7,8 @@
 
   <node pkg="control" type="joystick" name="joystick" output="screen">
   </node>
+  <node pkg="control" type="motor_control" name="motor_control" output="screen">
+  </node>
 
   <arg name="node_name"             value="velocity_smoother"/>
 	  <arg name="nodelet_manager_name"  value="nodelet_manager"/>

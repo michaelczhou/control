@@ -146,11 +146,11 @@ target_link_libraries(joystick
    ${Boost_LIBRARIES}
 )
 
-#add_executable(motor_control src/motor_control)
-#target_link_libraries(motor_control
-#   ${catkin_LIBRARIES}
-#   ${Boost_LIBRARIES}
-#)
+add_executable(motor_control src/motor_control)
+target_link_libraries(motor_control
+   ${catkin_LIBRARIES}
+   ${Boost_LIBRARIES}
+)
 
 #add_executable(motor_test src/motor_test)
 #target_link_libraries(motor_test
